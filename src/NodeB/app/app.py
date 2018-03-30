@@ -1,4 +1,4 @@
-"""Author: Trinity Core Team
+"""Author: Trinity Core Team 
 
 MIT License
 
@@ -22,17 +22,22 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE."""
 
-import json
-import os
-import logging
+from flask import Flask
+from flask_jsonrpc import JSONRPC
+from flask_sqlalchemy import SQLAlchemy
+import pymysql
+from flask_cors import CORS
+from NodeB.config import MYSQLDATABASE
 
-Configure_file = os.path.join(os.path.dirname(__file__),"configure.json")
-ChannelDBFile = os.path.join(os.path.dirname(__file__),"channel.db")
 
-with open(Configure_file,'r') as f:
-    Configure = json.load(f)
+pymysql.install_as_MySQLdb()
 
-Configure["DBFile"] = ChannelDBFile
-filepath = os.path.join(os.path.dirname(__file__), 'logging.conf')
-#logging.config.fileConfig(filepath)
-#Logger = logging.getLogger()
+app = Flask(__name__)
+cors = CORS(app, support_credentials=True)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://%s:%s@%s/%s' %(MYSQLDATABASE["user"],MYSQLDATABASE["passwd"],MYSQLDATABASE["host"],MYSQLDATABASE["db"])
+# app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////test.db'
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"]=True
+db = SQLAlchemy(app)
+jsonrpc = JSONRPC(app, "/")
+
+from .controller import *

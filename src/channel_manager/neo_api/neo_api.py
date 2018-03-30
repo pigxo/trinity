@@ -512,8 +512,25 @@ class NeoApi(object):
         params = [scripthash, operation, options]
         return self.post_request(self.generate_payload("invokefunction",params))
 
+    def create_contract(self, publicKey1,publicKey2,publicKey3):
+        params = [publicKey1,publicKey2,publicKey3]
+        return self.post_request(self.generate_payload("createMultiSigAddress", params))
 
+    def constructTx(self,addressFrom,addressTo,value,assetId):
+        params = [addressFrom,addressTo,value,assetId]
+        return self.post_request(self.generate_payload("constructTx", params))
 
+    def constructRawTx(self,txData,signature,publicKey):
+        params = [txData,signature,publicKey]
+        return self.post_request(self.generate_payload("constructRawTx", params))
+
+    def constructDepositTx(self,assetId,addressFrom,addressTo1,value1,addressTo2,value2):
+        params = [assetId,addressFrom,addressTo1,value1,addressTo2,value2]
+        return self.post_request(self.generate_payload("constructDepositTx", params))
+
+    def sendRawTx(self,TX):
+        params = [TX]
+        return self.post_request(self.generate_payload("sendRawTx",params))
 
 
 NEOSERVER = "http://47.88.35.235:8000/api/"

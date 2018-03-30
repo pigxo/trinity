@@ -38,35 +38,34 @@ jsonrpc = JSONRPC(app, "/")
 
 
 @jsonrpc.method("registeaddress")
-def regist_address(address, port = "20556"):
+def register_address(address, port = "20556", public_key=None):
     logger.info("registeaddress %s" %address)
     ip_info = request.headers.getlist("X-Forwarded-For")[0] if request.headers.getlist("X-Forwarded-For") \
         else request.remote_addr
     channel_address = ChannelAddress()
     try:
-        channel_address.add_address(address, ip=ip_info, port= port)
+        channel_address.add_address(address, ip=ip_info, port= port, public_key=public_key)
     except ChannelDBAddFail:
-        channel_address.delete_address(address)
+        #channel_address.delete_address(address)
         return State.raise_fail(101, "Can Not Add The Address")
     return State.success()
 
 
-@jsonrpc.method("registchannle")
-def regist_channle(sender_addr, receiver_addr, asset_type,deposit, open_blockchain):
-    logger.info("registchannle %s  %s" %(sender_addr, receiver_addr))
+@jsonrpc.method("registchannel")
+def register_channel(sender_addr, receiver_addr, asset_type,deposit, open_blockchain):
+    logger.info("registchannle %s  %s %s" %(sender_addr, receiver_addr,deposit))
     return manager.regist_channel(sender_addr, receiver_addr, asset_type,deposit, open_blockchain)
 
 
 @jsonrpc.method("getchannelstate")
 def get_channel_state(local_address):
-    logger.info("getchannelstate %s" %local_address)
+    #logger.info("getchannelstate %s" %local_address)
     return manager.get_channel_state(local_address)
 
 
 @jsonrpc.method("sendrawtransaction")
-def send_raw_transaction(sender_address,channel_name, hex):
-    logger.info("sendrawtransaction %s" %channel_name)
-    return manager.send_raw_transaction(sender_address, channel_name, hex)
+def send_raw_transaction(txdata, signature, publickey):
+    return manager.send_raw_transaction(txdata, signature, publickey)
 
 
 @jsonrpc.method("sendertoreceiver")
@@ -85,18 +84,19 @@ def close_channel(sender_addr, receiver_addr,channel_name):
 
 @jsonrpc.method("getbalanceonchain")
 def get_balance_onchain(local_address,asset_type=None):
-    logger.info("getbalanceonchain %s" %local_address)
+    #logger.info("getbalanceonchain %s" %local_address)
     return manager.get_balance_onchain(local_address, asset_type)
+
+
+@jsonrpc.method("settlerawtx")
+def settle_raw_tx(address, channel_name, txdata, signature):
+    return manager.settle_raw_tx(address, channel_name, txdata, signature)
 
 
 @jsonrpc.method("updatedeposit")
 def update_deposit(local_address, channel_name, asset_type, value):
     logger.info("updatedeposit %s %s %s" %(channel_name, local_address, value))
     return manager.update_deposit(local_address, channel_name, asset_type, value)
-
-@jsonrpc.method("allocateaddress")
-def allocate_address():
-    return manager.allocate_address()
 
 
 @jsonrpc.method("txonchain")
@@ -105,6 +105,22 @@ def tx_onchain(from_addr, to_addr, asset_type, value):
     return manager.tx_onchain(from_addr, to_addr, asset_type, value)
 
 
+@jsonrpc.method("depositin")
+def depositin(address, value):
+    logger.info("depositin %s" %address)
+    return manager.depositin(address, value)
 
-if __name__ == '__main__':
+
+@jsonrpc.method("depositout")
+def depoistout(address, value):
+    logger.info("depositout %s" %address)
+    return manager.depoistout(address, value)
+
+
+@jsonrpc.method("gethistory")
+def get_history(channel_name, index=0, count=10):
+    return manager.get_history(channel_name, index, count)
+
+
+if __name__ == "__main__":
     app.run(host='0.0.0.0', debug=True)

@@ -27,13 +27,9 @@ import logging
 from channel_manager.channel import Channel, State, get_channelnames_via_address
 from channel_manager import blockchain
 from utils.channel import split_channel_name
-from channel_manager.state import ChannelDatabase, ChannelFile, ChannelState, ChannelAddress
-from exception import ChannelExist, NoChannelFound, ChannelNotInOpenState,ChannelFileNoExist,ChannelExistInDb
-from utils.common import CommonItem
-from utils.channel import split_channel_name
-from configure import Configure
+from channel_manager.state import Message, ChannelState
+from logzero import logger
 
-Contract_addr = Configure["ContractAddr"]
 
 
 log = logging.getLogger(__name__)
@@ -50,41 +46,62 @@ def regist_channel(sender_addr, receiver_addr, asset_type,deposit, open_blockcha
                 "trad_info":raw_tans}
     """
     channel = Channel(sender_addr,receiver_addr)
-    if channel.find_channel():
+    logger.info('start to register channel')
+    if channel.qeury_channel():
         return {"error": "channel already exist"}
     else:
-        raw_tans,state = blockchain.NewTransection(asset_type, sender_addr, Contract_addr, int(deposit))
+        channel_name = channel.create(sender_deposit=int(deposit),
+                                      open_block_number=int(open_blockchain), settle_timeout=10)
+        if not channel_name:
+            return {"channel_name": None,
+                    "contract_address": None,
+                    "trad_info": "on pub key or not register pub key"}
+        channel.qeury_channel()
+        raw_tans,tx_id, state = blockchain.deposit_transaction(asset_type, sender_addr, channel.contract_address,
+                                                         int(deposit))
         if state:
-            channel_name = channel.create(sender_deposit=int(deposit),reciever_deposit=0,
-                                      open_block_number=int(open_blockchain),settle_timeout=10)
-
+            channel.update_channel_to_database(tx_id=tx_id, state=State.OPENING)
             return {"channel_name": channel_name,
+                    "contract_address": channel.contract_address,
                     "trad_info": raw_tans}
         else:
-            return {"channel_name":None,
-                    "trad_info":raw_tans}
+            channel.delete_channel()
+            channel.delete_channel_in_database()
+            return {"channel_name": None,
+                    "contract_address": None,
+                    "trad_info": raw_tans}
 
 
-def send_raw_transaction(sender_address, channel_name, hex):
+def send_raw_transaction(txdata, signature, publickey):
     """
     :param sender_address: String, the sender address
     :param channel_name: String, channel name
     :param hex: String, the digital signature string
     :return: String, SUCCESS
     """
-
-    blockchain.send_raw_transection(hex)
-    #return ch.set_channel_open()
-    return "SUCCESS"
-
+    raw_tx = blockchain.construct_raw_tx(txdata, signature, publickey)
+    return blockchain.send_raw_transaction(raw_tx)
 
 
 def get_channel_state(address):
     """
     :param sender_addr: String, the sender address
     :param receiver_addr: String, receiver's address
-    :return: Dictionary, the chnnnel information
+    :return: Dictionary, the channel information
     """
+    message_info={}
+    message = Message.pull_message(address)
+    if message:
+        message_info["type"] = "signature"
+        message_info["message"] = message
+
+    else:
+        channel_info = _get_channel_states_info(address)
+        message_info["type"] = "transaction"
+        message_info["message"] = channel_info
+    return message_info
+
+def _get_channel_states_info(address):
     channel_infos =[]
     channels = get_channelnames_via_address(address)
     for channel in channels:
@@ -102,10 +119,11 @@ def get_channel_state(address):
         else:
             channel_detail.append(recevier_info)
             channel_detail.append(sender_info)
-        channel_info  = {
+        channel_info = {
             "channel_name": ch.channel_name,
             "channel_state": str(State(ch.stateinDB)),
             "open_block":ch.open_block_number,
+            "contract_address": ch.contract_address,
              "tx_info": channel_detail
         }
         channel_infos.append(channel_info)
@@ -141,8 +159,7 @@ def close_channel(sender_addr, receiver_addr,channel_name):
     """
     sender, receiver = split_channel_name(channel_name)
     ch = Channel(sender, receiver)
-    ch.update_channel_state(State.SETTLING)
-    return ch.settle_banlace_onblockchain()
+    return ch.settle_balance_onchain()
 
 
 
@@ -170,31 +187,98 @@ def update_deposit(address, channel_name, asset_type, value):
     channel = Channel(sender, receiver)
 
     if channel.sender == address:
-        if channel.state_in_database != State.OPEN:
+        if channel.stateinDB != State.OPEN:
             return {"channel_name": channel.channel_name,
-                    "trad_info": "Channel exist but in state %s" % str(State(channel.state_in_database))}
+                    "trad_info": "Channel exist but in state %s" % str(State(channel.stateinDB))}
         else:
             channel.update_channel_to_database(sender_deposit_cache=float(value))
-            raw_tans ,state= blockchain.NewTransection(asset_type, address, Contract_addr, value)
+            raw_tans, tx_id, state= blockchain.deposit_transaction(asset_type, address,
+                                                                    channel.contract_address,value)
             if state:
-                channel.update_channel_state(state = State.UPDATING)
+                channel.update_channel_to_database(tx_id=tx_id, state=State.UPDATING)
     elif channel.receiver == address:
         channel.update_channel_to_database(receiver_deposit_cache=float(value))
-        raw_tans, state = blockchain.NewTransection(asset_type, address, Contract_addr, value)
+        raw_tans, tx_id, state = blockchain.deposit_transaction(asset_type, address,
+                                                                 channel.contract_address, value)
         if state:
-            channel.update_channel_state(state=State.UPDATING)
+            channel.update_channel_to_database(tx_id=tx_id, state=State.UPDATING)
+
     else:
         return {"error":"channel name not match the address"}
     return {"channel_name": channel.channel_name,
             "trad_info": raw_tans}
 
 
-def allocate_address():
-    return blockchain.allocate_address()
+def depositin(address, value):
+    channels = get_channelnames_via_address(address)
+    success_channel = []
+    for channel in channels:
+        print(channel.channel_name)
+        sender, receiver = split_channel_name(channel.channel_name)
+        ch = Channel(sender, receiver)
+        # if address == sender and value == ch.sender_deposit_cache:
+        if address == sender:
+            ch.set_channel_open()
+            success_channel.append(channel.channel_name)
+        # elif address == receiver and value == ch.receiver_deposit_cache:
+        elif address == receiver:
+            ch.set_channel_open()
+            success_channel.append(channel.channel_name)
+        else:
+            continue
+
+def depoistout(address, value):
+    channels = get_channelnames_via_address(address)
+    success_channel = []
+    for channel in channels:
+        if channel.state == State.SETTLING.value:
+            sender, receiver = split_channel_name(channel.channel_name)
+            ch = Channel(sender, receiver)
+            ch.close()
+            success_channel.append(channel.channel_name)
+        else:
+            continue
+
+def settle_raw_tx(address, channel_name, txdata, signature):
+    sig_in_channel = ChannelState(channel_name)
+    if sig_in_channel.senderinDB == address:
+        sig_in_channel.update_sender_signature(signature)
+    elif sig_in_channel.recieverinDB == address:
+        sig_in_channel.update_receiver_signature(signature)
+        Message.set_message_done(address, channel_name)
+    else:
+        return "address not match the channel"
+    Message.set_message_done(address, channel_name)
+
+    if sig_in_channel.sender_signature and sig_in_channel.receiver_signature:
+        print("sig_in_channel")
+        raw_data = blockchain.construct_deposit_raw_tx(txdata, sig_in_channel.sender_signature,
+                                                       sig_in_channel.receiver_signature,
+                                            sig_in_channel.contract_hash)
+        blockchain.send_raw_transaction(raw_data)
+        return "Success"
+    else:
+        return None
 
 
 def tx_onchain(from_addr, to_addr, asset_type, value):
-    return blockchain.tx_onchain(from_addr, to_addr, asset_type.upper(), value)
+    tx_data, tx_id, state = blockchain.deposit_transaction(asset_type,from_addr, to_addr, int(value))
+    if state:
+        return {"tx_info":tx_data,
+         "tx_id": tx_id}
+    else:
+        return {"tx_info":None,
+         "tx_id": None}
+
+
+def get_history(channel_name, index, count):
+    sender, receiver = split_channel_name(channel_name)
+    ch = Channel(sender, receiver)
+    result = ch.read_channel()
+    return result[int(index):int(index)+int(count)]
+
+
+
 
 
 

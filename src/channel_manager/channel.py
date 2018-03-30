@@ -24,9 +24,11 @@ SOFTWARE."""
 
 import time
 from channel_manager import blockchain
-from channel_manager.state import ChannelFile, ChannelState, query_channel_from_address
+from channel_manager.state import ChannelFile, ChannelState, query_channel_from_address, ChannelAddress, Message
 from enum import IntEnum
 from configure import Configure
+from utils.channel import generate_channel_name
+from logzero import logger
 from exception import (
     ChannelFileNoExist,
     ChannelExistInDb,
@@ -41,6 +43,7 @@ from exception import (
 )
 
 class State(IntEnum):
+    INITIAL=0
     OPENING = 1
     OPEN = 2
     SETTLING = 3
@@ -68,12 +71,8 @@ class Channel(ChannelFile, ChannelState):
 
     @property
     def channel_name(self):
-        channel_name = "".join(map(lambda x, y: x+y, self.sender, self.receiver))
-        peer_channel_name= "".join(map(lambda x, y: x+y, self.receiver, self.sender))
-        if ChannelState(peer_channel_name).find_channel():
-            return peer_channel_name
-        else:
-            return channel_name
+        channel_name = ChannelState.query_channel_name(self.sender, self.receiver)
+        return channel_name if channel_name else generate_channel_name(self.sender, self.receiver)
 
     @property
     def to_dict(self):
@@ -88,12 +87,22 @@ class Channel(ChannelFile, ChannelState):
                 setattr(ret, k, v)
         return ret
 
-    def create(self, sender_deposit,open_block_number, settle_timeout, reciever_deposit=0):
-        if not self.find_channel():
-            self.add_channle_to_database(sender= self.sender, receiver= self.receiver, channel_name=self.channel_name,
-                                             state=State.OPENING, sender_deposit=0,receiver_deposit=0,
+    def create(self, sender_deposit,open_block_number, settle_timeout, receiver_deposit=0):
+        if not self.qeury_channel():
+            sender_publickey = ChannelAddress.get_publickey(self.sender)
+            receiver_publickey = ChannelAddress.get_publickey(self.receiver)
+            if not sender_publickey or not receiver_publickey:
+                return None
+            contract = blockchain.create_contract_address(sender_publickey, receiver_publickey,
+                                                          Configure["EyewitnessPublicKey"])
+            contract_address = contract.get("contractForPublicKey1").get("address")
+            contract_hash = contract.get("contractForPublicKey1").get("script")
+            self.add_channel_to_database(sender= self.sender, receiver= self.receiver,
+                                             state=State.INITIAL, sender_deposit=0,receiver_deposit=0,
                                              open_block_number = open_block_number, sender_deposit_cache=sender_deposit,
-                                             receiver_deposit_cache=reciever_deposit,settle_timeout=settle_timeout)
+                                             receiver_deposit_cache=receiver_deposit,settle_timeout=settle_timeout,
+                                         contract_address=contract_address, contract_hash=contract_hash)
+            self.qeury_channel()
             self.initialize_channel_file()
             return self.channel_name
         else:
@@ -101,16 +110,16 @@ class Channel(ChannelFile, ChannelState):
 
     @check_channel_exist
     def delete(self):
-        if self.state_in_database != State.CLOSED:
+        if self.stateinDB != State.CLOSED.value:
             raise ChannleNotInCloseState
         else:
-            self.delete_channle_in_database()
+            self.delete_channel_in_database()
             self.delete_channel()
 
     def close(self):
         try:
             self.delete_channel()
-            self.delete_channle_in_database()
+            self.delete_channel_in_database()
         except:
             return False
         return True
@@ -123,11 +132,17 @@ class Channel(ChannelFile, ChannelState):
     def receiver_balance(self):
         return self.get_address_balance(self.receiver)
 
-    def settle_banlace_onblockchain(self):
-        return blockchain.tx_onchain(from_addr=Configure["ContractAddr"], to_addr=self.sender, asset_type="TNC",
-                                             value=self.sender_balance) \
-               and blockchain.tx_onchain(from_addr=Configure["ContractAddr"],to_addr=self.receiver, asset_type="TNC",
-                                                 value=self.receiver_balance)
+    def settle_balance_onchain(self):
+        raw_data, tx_id,state= blockchain.distribute_deposit_tx(asset_type="TNC", addressFrom=self.contract_address,
+                                                               addressTo1=self.sender,value1=self.sender_balance,
+                                                               addressTo2=self.receiver, value2=self.receiver_balance)
+        if state:
+            self.update_channel_to_database(tx_id=tx_id, state=State.SETTLING.value)
+            Message.push_message(self.sender, "signature", raw_data, self.channel_name)
+            Message.push_message(self.receiver, "signature", raw_data, self.channel_name)
+            return True
+        else:
+            return False
 
     def get_address_balance(self, address, channels = None):
         try:
@@ -169,24 +184,28 @@ class Channel(ChannelFile, ChannelState):
              "deposit": 0,
              "trans": 0,
              "balance": 0,
+             "time": time.asctime(time.localtime(time.time()))
 
              },
             {"address": self.receiver,
              "deposit": 0,
              "trans": 0,
              "balance": 0,
+             "time": time.asctime(time.localtime(time.time()))
              }
         ]
         if count <= 0:
             raise TransCanNotBelessThanZ
-        if not self.state_in_database == State.OPEN:
+        if not self.stateinDB == State.OPEN:
             raise ChannelNotInOpenState
         else:
             channels = self.read_channel()
             sender_deposit = self.get_address_deposit(self.sender, channels)
             transdetail[0]["deposit"] = float(self.sender_deposit)
             delta = float(self.sender_deposit) - float(sender_deposit)
+            print(delta)
             sender_balance = self.get_address_balance(self.sender, channels) + delta
+            print(self.sender, sender_balance)
             if count > sender_balance:
                 raise NoBalanceEnough
             else:
@@ -215,17 +234,18 @@ class Channel(ChannelFile, ChannelState):
              "deposit": 0,
              "trans": 0,
              "balance": 0,
-
+             "time": time.asctime(time.localtime(time.time()))
              },
             {"address": self.receiver,
              "deposit": 0,
              "trans": 0,
              "balance": 0,
+             "time": time.asctime(time.localtime(time.time()))
              }
         ]
         if count <= 0:
             raise TransCanNotBelessThanZ
-        if not self.state_in_database == State.OPEN:
+        if not self.stateinDB == State.OPEN:
             raise ChannelNotInOpenState
         else:
             channels = self.read_channel()
@@ -252,10 +272,10 @@ class Channel(ChannelFile, ChannelState):
 
     @check_channel_exist
     def check_closed(self):
-        return self.state_in_database == State.CLOSED
+        return self.stateinDB == State.CLOSED
 
     def has_channel(self):
-        return self.find_channel() and self.has_channel_file()
+        return self.qeury_channel() and self.has_channel_file()
 
     def initialize_channel_file(self):
         transdetail = [
@@ -263,12 +283,14 @@ class Channel(ChannelFile, ChannelState):
              "deposit": 0,
              "trans": 0,
              "balance": 0,
+             "time": time.asctime(time.localtime(time.time()))
 
              },
             {"address": self.receiver,
              "deposit": 0,
              "trans": 0,
              "balance": 0,
+             "time": time.asctime(time.localtime(time.time()))
              }
         ]
         transinfo = {"tx_id": "0", "tx_detail": transdetail}
@@ -279,31 +301,32 @@ class Channel(ChannelFile, ChannelState):
         return self.channel_name
 
     def set_channel_open(self):
-        print("set_channel_open", self.channelname)
         if not self.has_channel():
-            return "No channel find"
+            return ''
         else:
             tx_id = self.channel_txid
             sender_balance = self.get_address_balance(self.sender)
             receiver_balance = self.get_address_balance(self.receiver)
-            self.update_channel_deposit(sender_deposit=self.sender_deposit + self.sender_deposit_cache,
-                                        receiver_deposit=self.receiver_deposit + self.receiver_deposit_cache)
+
             tx_detail = [
                 {"address": self.sender,
                  "deposit": self.sender_deposit + self.sender_deposit_cache,
                  "trans": 0,
                  "balance": sender_balance + self.sender_deposit_cache,
+                 "time": time.asctime(time.localtime(time.time()))
 
                  },
                 {"address": self.receiver,
                  "deposit": self.receiver_deposit + self.receiver_deposit_cache,
                  "trans": 0,
                  "balance": receiver_balance + self.receiver_deposit_cache,
+                 "time": time.asctime(time.localtime(time.time()))
                  }
             ]
             trans_info = {"tx_id": str(int(tx_id)+ 1), "tx_detail": tx_detail}
             self.update_channel(**trans_info)
-
+            self.update_channel_deposit(sender_deposit=self.sender_deposit + self.sender_deposit_cache,
+                                        receiver_deposit=self.receiver_deposit + self.receiver_deposit_cache)
             self.update_channel_state(State.OPEN)
             self.update_deposit_cache(sender_deposit_cache=0, receiver_deposit_cache=0)
 
